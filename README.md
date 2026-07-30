@@ -38,8 +38,8 @@ The following files must be present before running. Set paths in scn2a_haplotype
 File | Source
 -----|------
 `data/Homo_sapiens_assembly38.fasta` (`.fai`)	| GRCh38 reference genome
-`data/igsr-1000genomes_sampleMap_30x_grch38-samples.tsv`	| [IGSR sample portal](url)
-`data/1kG_30x_2504unrelated.txt`	| From the [1000 Genomes 30x](url) resources: [Tab delimited file list for the 2504 panel](url)
+`data/igsr-1000genomes_sampleMap_30x_grch38-samples.tsv`	| [IGSR sample portal](https://www.internationalgenome.org/data-portal/sample)
+`data/1kG_30x_2504unrelated.txt`	| From the [1000 Genomes 30x](https://www.internationalgenome.org/data-portal/data-collection/1000genomes_30x) resources: [Tab delimited file list for the 2504 panel]([url](https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/1000G_2504_high_coverage.sequence.index))
 
 The chr2 phased VCF and SCN2A region VCF are downloaded and extracted automatically by the pipeline if not already present
 
