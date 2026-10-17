@@ -53,7 +53,7 @@ log "Run ID: ${RUN_ID}"
 # Validate required tools
 # ---------------------------------------------------------------------------
 log "--- Checking dependencies ---"
-for tool in "${bcftools}" "${plink}" tabix python3; do
+for tool in "${bcftools}" "${plink}" "${samtools}" tabix python3; do
     if ! command -v "${tool}" &>/dev/null; then
         log "ERROR: Required tool not found: ${tool}"
         exit 1
@@ -68,7 +68,7 @@ if [[ ! -f "${REF_FASTA}" ]]; then
 fi
 if [[ ! -f "${REF_FASTA}.fai" ]]; then
     log "Indexing reference FASTA..."
-    samtools faidx "${REF_FASTA}"
+    "${samtools}" faidx "${REF_FASTA}"
 fi
 
 # ---------------------------------------------------------------------------
