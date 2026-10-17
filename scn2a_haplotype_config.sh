@@ -28,7 +28,7 @@ SAMPLE_SUBSET_FILE="data/1kG_30x_2504unrelated.txt"
 # REFERENCES
 # ---------------------------------------------------------------------------
 # Remote VCF (NYGC 30x phased, chr2 only)
-VCF_URL="https://urldefense.com/v3/__https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/1kGP_high_coverage_Illumina.chr2.filtered.SNV_INDEL_SV_phased_panel.vcf.gz__;!!DOZ0RDvLTZqXlQ!yydXIMKn6s9vhm0XFbsJH_gUoZPfZjI9b7_h0jRSXb0TXrI_COURZlG2Zh-itmyv4XW7HkkL6M8Bwu1b$ "
+VCF_URL="https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/1kGP_high_coverage_Illumina.chr2.filtered.SNV_INDEL_SV_phased_panel.vcf.gz"
 
 # Local paths (checked before downloading)
 CHR2_VCF="data/1kGP_high_coverage_Illumina.chr2.filtered.SNV_INDEL_SV_phased_panel.vcf.gz"
