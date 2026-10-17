@@ -141,8 +141,7 @@ ASO SNPs.
 > widen it, the region is the only lever — `REGION`, `REGION_CHROM`, `REGION_START`
 > and `REGION_END` must agree with each other, since Steps 2 and 7 read them
 > separately — and it will raise the SNP and block counts while the baseline ASO
-> positions stay as they are. `BASELINE_ASOS` in the config is not the only place
-> those two SNPs live; see §8.5.
+> positions stay as they are.
 
 ---
 
@@ -271,8 +270,8 @@ fixture FASTA; it therefore tests everything *except* the real `samtools` call.
 ## 8. Known rough edges
 
 None of these is a problem on the authors' server. All of them are in the way of a
-run anywhere else. The pipeline scripts are untouched by this guide — these are
-written up so the fixes can be decided on rather than discovered.
+run anywhere else. They are written up so the fixes can be decided on rather than
+discovered; where one has been fixed or has a fix proposed, the entry says so.
 
 **8.1 — Step 7 cannot find samtools, and the run dies there.**
 `scn2a_generate_asog_table.py:163` calls
@@ -307,11 +306,19 @@ Step 6, after the expensive subsetting work.
 the absolute 1.9 path in the Python step. All three need to resolve, or the two that
 are used do.
 
-**8.5 — The baseline ASO SNPs are defined twice.** `BASELINE_ASOS` in the config
-drives Step 7's `UniqueSamplesAdded`, but `scn2a_parse_haplotypes.R` hardcodes
+**8.5 — The baseline ASO SNPs used to be defined twice; `BASELINE_ASOS` is now the
+only place.** The R step previously hardcoded the pair as
 `opt_ref_snps <- c("2:165375124:A:G", "2:165322227:A:G")` for Table S1's
-`ASOtargetIsAlt` column and the figure shape scale. Changing the config alone changes
-Step 7 and leaves Table S1 and the figures describing the old pair.
+`ASOtargetIsAlt` column and again inside the figure shape scale, so changing the
+config moved Step 7's `UniqueSamplesAdded` while Table S1 and the figures kept
+describing the old pair. The pipeline now passes `BASELINE_ASOS` to
+`scn2a_parse_haplotypes.R` as an eighth argument, and both steps match a baseline to
+a variant on `CHROM:POS` rather than on the full `CHROM:POS:REF:ALT` ID. Two
+consequences worth knowing: the R step called by hand with only its first seven
+arguments still falls back to the manuscript's pair, so old invocations behave as
+before; and because matching is now positional in both steps, a baseline entry whose
+alleles differ from the panel's still matches, where the R step would previously have
+missed it.
 
 **8.6 — Reading the output columns.** Three names do not mean what they look like.
 **Verified** against the fixture in §7:

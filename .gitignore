@@ -1,0 +1,3 @@
+# Created when tests/smoke_step7.py imports the Step 7 script
+__pycache__/
+*.pyc

@@ -202,6 +202,7 @@ Rscript "${SCRIPT_DIR}/scn2a_parse_haplotypes.R" \
     "${VIZ_MIN_HET}" \
     "${METADATA_FILE}" \
     "${LOG}" \
+    "${BASELINE_ASOS}" \
     2>>"${LOG}"
 
 log "  Per-block TSVs written to: ${OUTDIR}/haplotype_blocks/"
