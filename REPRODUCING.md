@@ -135,12 +135,14 @@ Everything else in the config is shared: the region
 `MIN_BLOCK_SIZE_BP=5000`, `VIZ_MIN_HET=100`, `WINDOW_SIZE=30`, and the two baseline
 ASO SNPs.
 
-> **For the MANE Select work:** the region is the only lever —
-> `REGION`, `REGION_CHROM`, `REGION_START`, `REGION_END` must agree with each other
-> (Steps 2 and 7 read them separately). Widening the region from the coding span to
-> the MANE Select transcript will raise the SNP and block counts, and the baseline
-> ASO positions stay as they are. Note that `BASELINE_ASOS` in the config is not the
-> only place those two SNPs live — see §8.5.
+> **On the MANE Select region:** this repository stays on the manuscript's
+> coding-domain region; the MANE Select transcript run is being done in the
+> `N-of-Many` repository, so look there before widening anything here. If you do
+> widen it, the region is the only lever — `REGION`, `REGION_CHROM`, `REGION_START`
+> and `REGION_END` must agree with each other, since Steps 2 and 7 read them
+> separately — and it will raise the SNP and block counts while the baseline ASO
+> positions stay as they are. `BASELINE_ASOS` in the config is not the only place
+> those two SNPs live; see §8.5.
 
 ---
 
@@ -284,16 +286,16 @@ raises `FileNotFoundError` and Step 7 exits non-zero, so under `set -e` the pipe
 aborts at Step 7 — Steps 1–6 and Table S1 complete, Table S2, the all-variant summary
 and the ASOG table are never written. (The `returncode != 0` branch below the call
 only catches a samtools that exists but errors; a missing binary never reaches it.)
-Three one-line fixes are possible — honour the configured path, take it as an
-argument, or fall back to `PATH` — and all three touch a pipeline script. Until one
-is chosen, Step 7 only runs on the authors' server or wherever that absolute path
-exists.
+A fix is proposed in **PR #2**, which makes the step use the configured path and turn
+an unreadable sequence window into a hard error. Until that merges, Step 7 only runs
+on the authors' server or wherever that absolute path exists.
 
 **8.2 — The configured download URL cannot be fetched.** `VCF_URL` in the config is a
 `urldefense.com` rewrite left by a mail gateway, and it ends in a space. Step 1's
-`wget` cannot use it. Stage the panel into `data/` by hand (§3) — Step 1 then skips
-the download because the `.vcf.gz` and `.tbi` are both present. The real path is
-under the 1kGP FTP directory linked in §3.
+`wget` cannot use it. **PR #1** restores the plain URL. Until it merges, stage the
+panel into `data/` by hand (§3) — Step 1 then skips the download because the
+`.vcf.gz` and `.tbi` are both present. The real path is under the 1kGP FTP directory
+linked in §3.
 
 **8.3 — `Rscript` is not in the dependency check.** The loop at
 `scn2a_haplotype_pipeline.sh:56` validates `bcftools`, `plink`, `tabix` and `python3`.
