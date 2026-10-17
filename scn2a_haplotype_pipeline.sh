@@ -215,6 +215,7 @@ python3 "${SCRIPT_DIR}/scn2a_generate_asog_table.py" \
     --vcf "${ANALYSIS_VCF}" \
     --blocks_dir "${OUTDIR}/haplotype_blocks" \
     --ref_fasta "${REF_FASTA}" \
+    --samtools "${samtools}" \
     --region_chrom "${REGION_CHROM}" \
     --region_start "${REGION_START}" \
     --region_end "${REGION_END}" \

@@ -11,6 +11,7 @@ Outputs:
 """
 
 import os
+import sys
 import gzip
 import glob
 import math
@@ -26,6 +27,9 @@ def parse_args():
     p.add_argument("--vcf",           required=True)
     p.add_argument("--blocks_dir",    required=True)
     p.add_argument("--ref_fasta",     required=True)
+    p.add_argument("--samtools",      default="samtools",
+                   help="samtools executable (path or name on PATH). "
+                        "The pipeline passes the value set in the config file.")
     p.add_argument("--region_chrom",  required=True)
     p.add_argument("--region_start",  type=int, required=True)
     p.add_argument("--region_end",    type=int, required=True)
@@ -152,21 +156,82 @@ def parse_vcf_variants(vcf_path, chrom, start, end):
 # ---------------------------------------------------------------------------
 # Reference sequence extraction
 # ---------------------------------------------------------------------------
-def fetch_sequence(ref_fasta, chrom, start, end):
+class SequenceFetchError(RuntimeError):
+    """Raised when a reference sequence window cannot be read."""
+
+
+def check_samtools(samtools, ref_fasta):
+    """
+    Verify samtools is runnable and the reference is faidx-indexed, so the run
+    fails at startup rather than after scoring thousands of empty windows.
+    """
+    try:
+        result = subprocess.run([samtools, "--version"],
+                                capture_output=True, text=True)
+    except OSError as exc:
+        raise SequenceFetchError(
+            f"cannot run samtools at '{samtools}': {exc}. "
+            f"Set the samtools path in the config file (or pass --samtools)."
+        ) from exc
+    if result.returncode != 0:
+        raise SequenceFetchError(
+            f"'{samtools} --version' exited {result.returncode}: "
+            f"{result.stderr.strip()}"
+        )
+    if not os.path.exists(ref_fasta):
+        raise SequenceFetchError(f"reference FASTA not found: {ref_fasta}")
+    if not os.path.exists(ref_fasta + ".fai"):
+        raise SequenceFetchError(
+            f"reference FASTA is not faidx-indexed: {ref_fasta}.fai is missing. "
+            f"Run '{samtools} faidx {ref_fasta}'."
+        )
+    return result.stdout.strip().split("\n")[0]
+
+
+def fetch_sequence(samtools, ref_fasta, chrom, start, end):
     """
     Fetch reference sequence using samtools faidx.
     start/end are 1-based inclusive.
-    Returns uppercase string.
+    Returns uppercase string of exactly (end - start + 1) bases.
+
+    Raises SequenceFetchError if samtools cannot be run, if it exits non-zero,
+    or if the window comes back empty or short. A window that cannot be read
+    is a hard error: silently returning "" scores the variant as zero and the
+    bad score is indistinguishable from a real one in the output table.
     """
     region = f"{chrom}:{start}-{end}"
-    result = subprocess.run(
-        ["/data0/prod_archive/software/samtools/samtools-1.9/samtools", "faidx", ref_fasta, region],
-        capture_output=True, text=True
-    )
+    try:
+        result = subprocess.run(
+            [samtools, "faidx", ref_fasta, region],
+            capture_output=True, text=True
+        )
+    except OSError as exc:
+        raise SequenceFetchError(
+            f"cannot run samtools at '{samtools}': {exc}"
+        ) from exc
+
     if result.returncode != 0:
-        return ""
+        raise SequenceFetchError(
+            f"samtools faidx failed for {region} (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+
     lines = result.stdout.strip().split("\n")
-    return "".join(lines[1:]).upper()
+    seq = "".join(lines[1:]).upper()
+    expected = end - start + 1
+
+    if not seq:
+        raise SequenceFetchError(
+            f"samtools faidx returned no sequence for {region} in {ref_fasta}. "
+            f"Check that the contig name matches the reference "
+            f"(e.g. 'chr2' vs '2')."
+        )
+    if len(seq) != expected:
+        raise SequenceFetchError(
+            f"samtools faidx returned {len(seq)} bases for {region}, "
+            f"expected {expected}. The window may run off the end of {chrom}."
+        )
+    return seq
 
 
 def gc_content(seq):
@@ -211,7 +276,7 @@ def load_metadata(metadata_file):
 # ---------------------------------------------------------------------------
 # Build ref and alt sequences for a variant
 # ---------------------------------------------------------------------------
-def build_sequences(ref_fasta, chrom, pos, ref, alt, window_size):
+def build_sequences(samtools, ref_fasta, chrom, pos, ref, alt, window_size):
     """
     Build RefSeq and AltSeq centered on the variant.
     pos is 1-based.
@@ -228,10 +293,9 @@ def build_sequences(ref_fasta, chrom, pos, ref, alt, window_size):
     win_start = pos - half
     win_end   = pos + half + (ref_len - 1)  # extend for ref length
 
-    # Fetch reference sequence for the full window
-    ref_seq_full = fetch_sequence(ref_fasta, chrom, win_start, win_end)
-    if not ref_seq_full:
-        return win_start, win_end, "", ""
+    # Fetch reference sequence for the full window.
+    # Raises SequenceFetchError rather than returning an empty window.
+    ref_seq_full = fetch_sequence(samtools, ref_fasta, chrom, win_start, win_end)
 
     # Build alt sequence by substituting alt allele at the center
     # The variant occupies positions [half, half + ref_len) in the window (0-based)
@@ -254,8 +318,14 @@ def allele_specific_score(ref_seq, alt_seq, ref_allele, alt_allele, window_size)
         2 if transversion
     Component 2: +1 if insertion AND 3-base window around center differs
     """
+    # Sequences are built by build_sequences(), which raises rather than
+    # returning an empty window, so empty input here is a bug, not a variant
+    # that happens to score zero.
     if not ref_seq or not alt_seq:
-        return 0
+        raise SequenceFetchError(
+            f"empty sequence window for {ref_allele}>{alt_allele}: "
+            f"cannot compute an allele-specific score"
+        )
 
     center_0 = window_size // 2  # 0-based center index
 
@@ -269,7 +339,11 @@ def allele_specific_score(ref_seq, alt_seq, ref_allele, alt_allele, window_size)
     alt_center = safe_char(alt_seq, center_0)
 
     if not ref_center or not alt_center:
-        return 0
+        raise SequenceFetchError(
+            f"sequence window is too short to read the center base "
+            f"(index {center_0}; ref {len(ref_seq)} bases, "
+            f"alt {len(alt_seq)} bases) for {ref_allele}>{alt_allele}"
+        )
 
     # Component 1
     if ref_center == alt_center:
@@ -309,6 +383,13 @@ def main():
     log_msg(f"  Cohort size: {args.cohort_size}", logfile)
     log_msg(f"  Window size: {args.window_size}", logfile)
     log_msg(f"  ASOG min het: {args.asog_min_het}", logfile)
+
+    # -----------------------------------------------------------------------
+    # Check samtools before any scoring, so a bad path fails here rather
+    # than turning every allele-specific score into a zero.
+    # -----------------------------------------------------------------------
+    version = check_samtools(args.samtools, args.ref_fasta)
+    log_msg(f"  samtools: {args.samtools} ({version})", logfile)
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -435,7 +516,8 @@ def main():
 
         # Build sequences
         win_start, win_end, ref_seq, alt_seq = build_sequences(
-            args.ref_fasta, args.region_chrom, pos, ref, alt, args.window_size
+            args.samtools, args.ref_fasta, args.region_chrom,
+            pos, ref, alt, args.window_size
         )
 
         # AlleleSpecificScore
@@ -626,4 +708,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SequenceFetchError as exc:
+        sys.stderr.write(f"ERROR: {exc}\n")
+        sys.exit(1)
