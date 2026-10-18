@@ -160,6 +160,41 @@ class SequenceFetchError(RuntimeError):
     """Raised when a reference sequence window cannot be read."""
 
 
+class WindowOutOfBounds(Exception):
+    """
+    Raised when a variant's window would extend past either end of its contig.
+
+    This is not a configuration error — the contig is present and readable, the
+    variant simply sits too close to its end for a full window. samtools faidx
+    would return a short sequence (or none) and exit 0, so these variants are
+    detected from the contig length and flagged rather than scored.
+    """
+    def __init__(self, chrom, contig_len, win_start, win_end):
+        self.chrom = chrom
+        self.contig_len = contig_len
+        self.win_start = win_start
+        self.win_end = win_end
+        super().__init__(
+            f"window {chrom}:{win_start}-{win_end} extends beyond {chrom} "
+            f"(length {contig_len})"
+        )
+
+
+def load_contig_lengths(ref_fasta):
+    """
+    Read contig name -> length from the faidx index (column 2 of the .fai).
+    Used to detect windows that would overrun a contig end before asking
+    samtools for them.
+    """
+    lengths = {}
+    with open(ref_fasta + ".fai") as fh:
+        for line in fh:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) >= 2:
+                lengths[fields[0]] = int(fields[1])
+    return lengths
+
+
 def check_samtools(samtools, ref_fasta):
     """
     Verify samtools is runnable and the reference is faidx-indexed, so the run
@@ -276,7 +311,8 @@ def load_metadata(metadata_file):
 # ---------------------------------------------------------------------------
 # Build ref and alt sequences for a variant
 # ---------------------------------------------------------------------------
-def build_sequences(samtools, ref_fasta, chrom, pos, ref, alt, window_size):
+def build_sequences(samtools, ref_fasta, chrom, pos, ref, alt, window_size,
+                    contig_len=None):
     """
     Build RefSeq and AltSeq centered on the variant.
     pos is 1-based.
@@ -284,6 +320,10 @@ def build_sequences(samtools, ref_fasta, chrom, pos, ref, alt, window_size):
     For indels: AltSeq may differ in length.
 
     Returns: (win_start, win_end, ref_seq, alt_seq)
+
+    Raises WindowOutOfBounds if contig_len is given and the window would run off
+    either end of the contig, so the caller can flag the variant instead of
+    scoring a truncated window.
     """
     half = window_size // 2
     ref_len = len(ref)
@@ -292,6 +332,12 @@ def build_sequences(samtools, ref_fasta, chrom, pos, ref, alt, window_size):
     # Window centered on variant start position
     win_start = pos - half
     win_end   = pos + half + (ref_len - 1)  # extend for ref length
+
+    # A variant too close to either contig end cannot have a full window.
+    # Detect it here: samtools faidx would return a short sequence, or none,
+    # and still exit 0.
+    if contig_len is not None and (win_start < 1 or win_end > contig_len):
+        raise WindowOutOfBounds(chrom, contig_len, win_start, win_end)
 
     # Fetch reference sequence for the full window.
     # Raises SequenceFetchError rather than returning an empty window.
@@ -390,6 +436,16 @@ def main():
     # -----------------------------------------------------------------------
     version = check_samtools(args.samtools, args.ref_fasta)
     log_msg(f"  samtools: {args.samtools} ({version})", logfile)
+
+    contig_lengths = load_contig_lengths(args.ref_fasta)
+    region_contig_len = contig_lengths.get(args.region_chrom)
+    if region_contig_len is None:
+        raise SequenceFetchError(
+            f"contig '{args.region_chrom}' is not in {args.ref_fasta}.fai. "
+            f"Check that the contig name matches the reference "
+            f"(e.g. 'chr2' vs '2')."
+        )
+    log_msg(f"  {args.region_chrom} length: {region_contig_len:,} bp", logfile)
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -506,6 +562,7 @@ def main():
     log_msg("Building ASOG table...", logfile)
     asog_rows = []
     snp_rows = []
+    flagged_variants = []
 
     for v in variants:
         pos = v["pos"]
@@ -514,18 +571,37 @@ def main():
         n_het = v["n_het"]
         het_samples = v["samples_het"]
 
-        # Build sequences
-        win_start, win_end, ref_seq, alt_seq = build_sequences(
-            args.samtools, args.ref_fasta, args.region_chrom,
-            pos, ref, alt, args.window_size
-        )
+        # Build sequences. A variant too close to a contig end cannot have a
+        # full window: flag it and leave its score blank, never 0, since 0 is a
+        # legitimate score. Flagged variants are excluded from the ASOG table,
+        # which ranks on that score.
+        window_flag = ""
+        try:
+            win_start, win_end, ref_seq, alt_seq = build_sequences(
+                args.samtools, args.ref_fasta, args.region_chrom,
+                pos, ref, alt, args.window_size,
+                contig_len=contig_lengths.get(args.region_chrom)
+            )
+        except WindowOutOfBounds as oob:
+            window_flag = "window_beyond_contig_end"
+            win_start, win_end = oob.win_start, oob.win_end
+            ref_seq = alt_seq = ""
+            aso_score = ""
+            ref_gc = alt_gc = None
+            flagged_variants.append({
+                "Chrom": v["chrom"], "Pos": pos, "Ref": ref, "Alt": alt,
+                "Total_Het": n_het,
+                "win_start": win_start, "win_end": win_end,
+                "contig_length": oob.contig_len,
+                "reason": str(oob),
+            })
+        else:
+            # AlleleSpecificScore
+            aso_score = allele_specific_score(ref_seq, alt_seq, ref, alt, args.window_size)
 
-        # AlleleSpecificScore
-        aso_score = allele_specific_score(ref_seq, alt_seq, ref, alt, args.window_size)
-
-        # GC content
-        ref_gc = gc_content(ref_seq)
-        alt_gc = gc_content(alt_seq)
+            # GC content
+            ref_gc = gc_content(ref_seq)
+            alt_gc = gc_content(alt_seq)
 
         # Unique samples added beyond baseline
         unique_added = len(het_samples - baseline_het_samples)
@@ -603,11 +679,13 @@ def main():
             "ref_seq":         ref_seq,
             "alt_seq":         alt_seq,
             "del_size":        del_size,
+            "window_flag":     window_flag,
         }
         snp_rows.append(snp_row)
 
-        # ASOG row: only variants with n_het >= asog_min_het
-        if n_het >= args.asog_min_het:
+        # ASOG row: only variants with n_het >= asog_min_het, and only those
+        # with a full sequence window — the table ranks on AlleleSpecificScore.
+        if n_het >= args.asog_min_het and not window_flag:
             asog_rows.append({
                 "Variant":            f"{v['chrom']}:{pos}:{ref}:{alt}",
                 "AlleleSpecificScore": aso_score,
@@ -627,6 +705,31 @@ def main():
 
     log_msg(f"  Total PASS variants: {len(snp_rows)}", logfile)
     log_msg(f"  Variants in ASOG table (n_het >= {args.asog_min_het}): {len(asog_rows)}", logfile)
+
+    # -----------------------------------------------------------------------
+    # Report variants flagged for an incomplete window
+    # -----------------------------------------------------------------------
+    if flagged_variants:
+        log_msg(
+            f"  FLAGGED (window beyond contig end, not scored): "
+            f"{len(flagged_variants)} of {len(snp_rows)} variants", logfile
+        )
+        for f in flagged_variants[:10]:
+            log_msg(f"    {f['Chrom']}:{f['Pos']} {f['Ref']}>{f['Alt']}: {f['reason']}",
+                    logfile)
+        if len(flagged_variants) > 10:
+            log_msg(f"    ... and {len(flagged_variants) - 10} more", logfile)
+
+        flagged_cols = ["Chrom", "Pos", "Ref", "Alt", "Total_Het",
+                        "win_start", "win_end", "contig_length", "reason"]
+        flagged_out = os.path.join(args.outdir, "flagged_window_variants.tsv")
+        with open(flagged_out, "w") as f:
+            f.write("\t".join(flagged_cols) + "\n")
+            for row in sorted(flagged_variants, key=lambda r: r["Pos"]):
+                f.write("\t".join(str(row.get(c, "")) for c in flagged_cols) + "\n")
+        log_msg(f"  Flagged variants written: {flagged_out}", logfile)
+    else:
+        log_msg("  Flagged (window beyond contig end): 0", logfile)
 
     # -----------------------------------------------------------------------
     # Rank ASOG rows
@@ -694,7 +797,7 @@ def main():
         "Total_Het", "Total_HomAlt", "Total_HomRef",
         "HapBlock", "allele_specific_score", "unique_samples_added",
         "ref_gc", "alt_gc", "win_start", "win_end",
-        "ref_seq", "alt_seq", "del_size",
+        "ref_seq", "alt_seq", "del_size", "window_flag",
     ]
 
     full_snp_out = os.path.join(args.outdir, "all_variants_summary.tsv")
