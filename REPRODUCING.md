@@ -46,9 +46,10 @@ bcftools="$CONDA_PREFIX/bin/bcftools"
 samtools="$CONDA_PREFIX/bin/samtools"
 ```
 
-`tabix`, `python3` and `Rscript` are called bare and must be on `PATH`. So is
-`samtools` at one spot (`scn2a_haplotype_pipeline.sh:71`, which indexes the reference
-if no `.fai` is present) — inside the conda environment both are true.
+`tabix`, `python3` and `Rscript` are called bare and must be on `PATH`. Every use of
+samtools now goes through the config variable: the dependency check, the reference
+indexing, and Step 7, which receives it as `--samtools`. Inside the conda environment
+all of this holds.
 
 ---
 
@@ -110,8 +111,11 @@ raises a `ValueError` naming the header it found if either is missing. The 2,504
 is a bare list of sample IDs, one per line — not the IGSR sequence index, which has a
 header and many columns. Extract it with `cut`/`awk` if you downloaded the index.
 
-If the reference has no `.fai`, Step 1 creates one with `samtools faidx`; indexing a
-3 GB FASTA takes a minute or two.
+If the reference has no `.fai`, the pipeline creates one with `samtools faidx` before
+Step 1; indexing a 3 GB FASTA takes a minute or two. Step 7 needs that index for more
+than sequence fetching — it reads contig lengths from the `.fai` to tell a variant
+near a contig end from a broken reference — and it checks for both samtools and the
+index upfront rather than part way through scoring.
 
 ---
 
@@ -161,13 +165,13 @@ What each step consumes and produces:
 
 | Step | Reads | Writes | Fails if |
 |---|---|---|---|
-| 1 Acquire | `VCF_URL` | `data/…chr2….vcf.gz` + `.tbi` | the URL is unusable — see §8.2; stage the file instead |
+| 1 Acquire | `VCF_URL` | `data/…chr2….vcf.gz` + `.tbi` | skipped when the panel and its `.tbi` are already in `data/` |
 | 2 Region subset | chr2 panel | `REGION_VCF` + `.tbi` | skipped when both already exist |
 | 3 Sample subset | `REGION_VCF`, `SAMPLE_SUBSET_FILE` | `OUTDIR/analysis_input.vcf.gz` | symlinks the region VCF when no subset file is set; cohort size is counted here and passed to Step 7 |
 | 4 Blocks + LD | `analysis_input.vcf.gz` | `plink/scn2a.{bed,bim,fam,blocks,blocks.det,ld}` | PLINK 2 instead of 1.9 |
 | 5 Hapsample | `analysis_input.vcf.gz` | `hapsample/scn2a.{hap.gz,sample}` | |
 | 6 Parse (R) | `.blocks.det`, `.ld`, hapsample, metadata | per-block TSVs, figures, Table S1 | `Rscript` or any R package missing |
-| 7 ASOG table (Python) | `analysis_input.vcf.gz`, block TSVs, reference | Table S2, `all_variants_summary.tsv`, `asog_input_table.tsv` | the hardcoded samtools path — see §8.1 |
+| 7 ASOG table (Python) | `analysis_input.vcf.gz`, block TSVs, reference + `.fai` | Table S2, `all_variants_summary.tsv`, `asog_input_table.tsv`, `flagged_window_variants.tsv` | samtools is not runnable at the configured path, or the reference is not indexed — both checked upfront |
 
 Step 7 re-counts genotypes from the VCF itself rather than reusing PLINK's, so Table
 S2 and Table S1 are produced by two independent passes over the same data. Comparing
@@ -235,8 +239,10 @@ The things worth looking at, in order:
 - **Blocks were found.** The log's `Blocks >= 5000 bp:` line being `0` means Step 6
   wrote nothing; with only 100 samples that can be real (MAF 0.15 is harder to clear),
   so retry with a larger subset before suspecting the code.
-- **`RefSeq`/`AltSeq` are not empty.** Empty sequence columns mean the reference was
-  never read — §8.1.
+- **`flagged_window_variants.tsv` is empty or absent.** Variants whose 31 bp window
+  would run past the end of the contig are listed there rather than scored, with the
+  reason. A long list means the reference and the panel disagree about the contig,
+  not that those variants are near the end of chromosome 2.
 - **Block SNP IDs matched.** Step 6 normalises hapsample IDs (`chr` prefix stripped,
   `_` to `:`) to match PLINK's `.blocks.det`. If a panel's ID column is formatted
   differently, blocks come out with no SNPs and the per-block TSVs are empty while
@@ -261,50 +267,55 @@ python3 tests/smoke_step7.py
 
 **Verified:** this passes on the current `main`. It is the quickest way to tell
 whether a change to the Python step altered the genotype counts, the superpopulation
-stratification, the block join, the sequence window or the ranking. Because the step's
-samtools path is hardcoded (§8.1), the test substitutes a pure-Python `faidx` of the
-fixture FASTA; it therefore tests everything *except* the real `samtools` call.
+stratification, the block join, the window arithmetic or the ranking.
+
+What it does **not** reach matters as much, because it needs no external tools only by
+standing in for them. The test replaces `fetch_sequence` with a pure-Python `faidx` of
+the fixture FASTA and stubs `check_samtools`, so nothing in it runs samtools at all. A
+green run therefore says nothing about whether your configured `samtools` path works,
+whether your reference is faidx-indexed, or whether real sequence windows come back
+correct — the first two fail fast in a real run, and §6 is what exercises the third.
+It does read a real `.fai` for contig lengths, since the fixture ships one.
 
 ---
 
 ## 8. Known rough edges
 
-None of these is a problem on the authors' server. All of them are in the way of a
-run anywhere else. They are written up so the fixes can be decided on rather than
-discovered; where one has been fixed or has a fix proposed, the entry says so.
+None of these was ever a problem on the authors' server; each one was in the way of a
+run anywhere else. Three have since been fixed on `main` and their entries say so,
+because a checkout or a run that predates the fix still behaves the old way, and the
+failure is easier to recognise than to diagnose. The rest are open.
 
-**8.1 — Step 7 cannot find samtools, and the run dies there.**
-`scn2a_generate_asog_table.py:163` calls
+**8.1 — Step 7 used to die looking for samtools. Fixed on `main`.** The Python step
+called `/data0/prod_archive/software/samtools/samtools-1.9/samtools` directly,
+ignoring the config's `samtools` variable. **Verified** before the fix: off that
+server the call raised `FileNotFoundError` and Step 7 exited non-zero, so under
+`set -e` the pipeline aborted there — Steps 1–6 and Table S1 complete, Table S2, the
+all-variant summary and the ASOG table never written. (The `returncode != 0` branch
+below the call only caught a samtools that existed but errored; a missing binary never
+reached it.) The step now takes `--samtools` from the config, checks that samtools runs
+and that the reference is indexed before it scores anything, and records a window it
+cannot read in `flagged_window_variants.tsv` rather than scoring it zero. If you see
+that absolute path in a traceback, you are running a copy from before the fix.
 
-```
-/data0/prod_archive/software/samtools/samtools-1.9/samtools
-```
-
-ignoring the config's `samtools` variable. **Verified:** off that server the call
-raises `FileNotFoundError` and Step 7 exits non-zero, so under `set -e` the pipeline
-aborts at Step 7 — Steps 1–6 and Table S1 complete, Table S2, the all-variant summary
-and the ASOG table are never written. (The `returncode != 0` branch below the call
-only catches a samtools that exists but errors; a missing binary never reaches it.)
-A fix is proposed in **PR #2**, which makes the step use the configured path and turn
-an unreadable sequence window into a hard error. Until that merges, Step 7 only runs
-on the authors' server or wherever that absolute path exists.
-
-**8.2 — The configured download URL cannot be fetched.** `VCF_URL` in the config is a
-`urldefense.com` rewrite left by a mail gateway, and it ends in a space. Step 1's
-`wget` cannot use it. **PR #1** restores the plain URL. Until it merges, stage the
-panel into `data/` by hand (§3) — Step 1 then skips the download because the
-`.vcf.gz` and `.tbi` are both present. The real path is under the 1kGP FTP directory
-linked in §3.
+**8.2 — The configured download URL could not be fetched. Fixed on `main`.** `VCF_URL`
+held a `urldefense.com` rewrite left by a mail gateway, with a trailing space, so both
+of Step 1's `wget` calls failed — the panel and `"${VCF_URL}.tbi"`. It now holds the
+plain EBI address under the 1kGP FTP directory linked in §3. Staging the panel into
+`data/` by hand is still the quicker route if you already have it, since Step 1 skips
+the download when the `.vcf.gz` and its `.tbi` are both present.
 
 **8.3 — `Rscript` is not in the dependency check.** The loop at
-`scn2a_haplotype_pipeline.sh:56` validates `bcftools`, `plink`, `tabix` and `python3`.
-A machine without R or without one R package gets through Steps 1–5 and fails at
-Step 6, after the expensive subsetting work.
+`scn2a_haplotype_pipeline.sh:56` validates `bcftools`, `plink`, `samtools`, `tabix`
+and `python3`. A machine without R, or missing one R package, still gets through
+Steps 1–5 and fails at Step 6, after the expensive subsetting work. This one is open.
 
-**8.4 — `samtools` is named three different ways.** The config's `samtools` variable
-(a 1.3 build), a bare `samtools` on `PATH` at `scn2a_haplotype_pipeline.sh:71`, and
-the absolute 1.9 path in the Python step. All three need to resolve, or the two that
-are used do.
+**8.4 — `samtools` used to be named three different ways; it is named once now. Fixed
+on `main`.** The config's `samtools` variable, a bare `samtools` on `PATH` in the
+pipeline, and the absolute 1.9 path inside the Python step all had to resolve, and the
+three could be different builds. Every use now goes through the config variable: the
+dependency check and the reference indexing read `"${samtools}"`, and Step 7 receives
+it as `--samtools` (§1).
 
 **8.5 — The baseline ASO SNPs used to be defined twice; `BASELINE_ASOS` is now the
 only place.** The R step previously hardcoded the pair as
@@ -353,6 +364,7 @@ reports success.
 From the outputs: `all_blocks_haplotype_summary.tsv` has one row per haplotype per
 block with per-superpopulation Hom/Het/Total; `snp_summary_table.tsv` covers only
 SNPs inside blocks ≥ 5 kb, so it is much shorter than `all_variants_summary.tsv`;
-`asog_input_table.tsv` is ranked from 1 with non-empty `RefSeq` and `AltSeq`; and
-each block ≥ 5 kb has a TSV, two PDFs, two SVGs and a PNG, except where no haplotype
-cleared `VIZ_MIN_HET`.
+`asog_input_table.tsv` is ranked from 1 with non-empty `RefSeq` and `AltSeq`;
+`flagged_window_variants.tsv` is absent or holds only a header, since it collects the
+variants whose window could not be built (§6.4); and each block ≥ 5 kb has a TSV, two
+PDFs, two SVGs and a PNG, except where no haplotype cleared `VIZ_MIN_HET`.
