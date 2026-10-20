@@ -53,7 +53,7 @@ log "Run ID: ${RUN_ID}"
 # Validate required tools
 # ---------------------------------------------------------------------------
 log "--- Checking dependencies ---"
-for tool in "${bcftools}" "${plink}" tabix python3; do
+for tool in "${bcftools}" "${plink}" "${samtools}" tabix python3; do
     if ! command -v "${tool}" &>/dev/null; then
         log "ERROR: Required tool not found: ${tool}"
         exit 1
@@ -68,7 +68,7 @@ if [[ ! -f "${REF_FASTA}" ]]; then
 fi
 if [[ ! -f "${REF_FASTA}.fai" ]]; then
     log "Indexing reference FASTA..."
-    samtools faidx "${REF_FASTA}"
+    "${samtools}" faidx "${REF_FASTA}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -215,6 +215,7 @@ python3 "${SCRIPT_DIR}/scn2a_generate_asog_table.py" \
     --vcf "${ANALYSIS_VCF}" \
     --blocks_dir "${OUTDIR}/haplotype_blocks" \
     --ref_fasta "${REF_FASTA}" \
+    --samtools "${samtools}" \
     --region_chrom "${REGION_CHROM}" \
     --region_start "${REGION_START}" \
     --region_end "${REGION_END}" \
