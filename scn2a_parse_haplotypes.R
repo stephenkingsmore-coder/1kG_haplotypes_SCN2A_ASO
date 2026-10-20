@@ -26,9 +26,15 @@ suppressPackageStartupMessages({
 # Arguments — read from command line positional args or environment variables
 # Usage: Rscript scn2a_parse_haplotypes.R \
 #            <plink_prefix> <hapsample_prefix> <outdir> \
-#            <min_block_bp> <viz_min_het> <log>
+#            <min_block_bp> <viz_min_het> <metadata_file> <log> \
+#            [baseline_asos]
 # ---------------------------------------------------------------------------
 args <- commandArgs(trailingOnly=TRUE)
+
+# Baseline ASO target SNPs, in the config's own "rsID:CHROM:POS" format, space
+# separated. Defaults to the manuscript's pair, so calling this script with the
+# first seven arguments behaves exactly as it did before.
+DEFAULT_BASELINE_ASOS <- "rs1368238:chr2:165375124 rs72874313:chr2:165322227"
 
 opt <- list(
     plink_prefix     = if (length(args) >= 1) args[1] else Sys.getenv("PLINK_PREFIX"),
@@ -37,7 +43,9 @@ opt <- list(
     min_block_bp     = as.integer(if (length(args) >= 4) args[4] else Sys.getenv("MIN_BLOCK_BP", "5000")),
     viz_min_het      = as.integer(if (length(args) >= 5) args[5] else Sys.getenv("VIZ_MIN_HET", "100")),
     metadata_file    = if (length(args) >= 6) args[6] else Sys.getenv("METADATA_FILE"),
-    log              = if (length(args) >= 7) args[7] else Sys.getenv("LOG_FILE", "")
+    log              = if (length(args) >= 7) args[7] else Sys.getenv("LOG_FILE", ""),
+    baseline_asos    = if (length(args) >= 8 && nchar(args[8]) > 0) args[8]
+                       else Sys.getenv("BASELINE_ASOS", DEFAULT_BASELINE_ASOS)
 )
 
 log_msg <- function(msg) {
@@ -46,8 +54,38 @@ log_msg <- function(msg) {
     if (nchar(opt$log) > 0) cat(ts, msg, "\n", sep=" ", file=opt$log, append=TRUE)
 }
 
-# Reference ASO SNP IDs in CHR:POS:REF:ALT format (matching hap SNP ID format)
-opt_ref_snps <- c("2:165375124:A:G", "2:165322227:A:G")
+# ---------------------------------------------------------------------------
+# Baseline ASO target SNPs
+# ---------------------------------------------------------------------------
+# The config gives these as "rsID:CHROM:POS", which carries no alleles, while hap
+# SNP IDs are CHR:POS:REF:ALT. Both are reduced to a "CHR:POS" key so that the two
+# can be matched on position.
+
+# "2:165375124:A:G" or "chr2:165375124:A:G" -> "2:165375124"
+snp_pos_key <- function(snp_id) {
+    parts <- strsplit(sub("^chr", "", snp_id), ":", fixed=TRUE)
+    vapply(parts, function(p)
+               if (length(p) >= 2) paste(p[1], p[2], sep=":") else NA_character_,
+           character(1), USE.NAMES=FALSE)
+}
+
+# "rs1368238:chr2:165375124 rs72874313:chr2:165322227" -> c("2:165375124", "2:165322227")
+parse_baseline_asos <- function(spec) {
+    entries <- strsplit(trimws(spec), "[[:space:]]+")[[1]]
+    entries <- entries[nchar(entries) > 0]
+    if (length(entries) == 0) return(character(0))
+    keys <- vapply(entries, function(entry) {
+        parts <- strsplit(entry, ":", fixed=TRUE)[[1]]
+        if (length(parts) < 3) return(NA_character_)
+        paste(sub("^chr", "", parts[2]), parts[3], sep=":")
+    }, character(1), USE.NAMES=FALSE)
+    keys[!is.na(keys)]
+}
+
+baseline_keys <- parse_baseline_asos(opt$baseline_asos)
+log_msg(paste("Baseline ASO targets:",
+              if (length(baseline_keys) > 0) paste(baseline_keys, collapse=", ")
+              else "none"))
 
 dir.create(opt$outdir, recursive=TRUE, showWarnings=FALSE)
 
@@ -250,10 +288,8 @@ for (i in seq_len(nrow(blocks_large))) {
             # ASOtargetIsAlt: TRUE if any ASO target SNP carries alt allele in this haplotype
             ASOtargetIsAlt = sapply(pattern, function(p) {
                 alleles <- as.integer(strsplit(p, "-")[[1]])
-                any(sapply(opt_ref_snps, function(aso) {
-                    idx <- which(filt$SNP == aso)
-                    length(idx) > 0 && alleles[idx] == 1
-                }))
+                idx <- which(snp_pos_key(filt$SNP) %in% baseline_keys)
+                length(idx) > 0 && any(alleles[idx] == 1, na.rm=TRUE)
             }),
             RefAltAllelePattern = pattern,
             SNPs = paste(filt$SNP, collapse="|")
@@ -291,7 +327,7 @@ for (i in seq_len(nrow(blocks_large))) {
             pos     = as.integer(pos_str),
             allele  = ifelse(refalt == "0", "reference",
                       ifelse(nchar(ref_str) != nchar(alt_str), "indel", alt_str)),
-            aso_snp = ifelse(SNP %in% opt_ref_snps, SNP, "not ASO SNV")
+            aso_snp = ifelse(snp_pos_key(SNP) %in% baseline_keys, SNP, "not ASO SNV")
         ) %>%
         dplyr::mutate(
             allele  = factor(allele, levels=c("A","T","G","C","indel","reference")),
@@ -314,13 +350,19 @@ for (i in seq_len(nrow(blocks_large))) {
           dplyr::mutate(Haplotype=factor(Haplotype, levels=hap_order)) %>%
           dplyr::arrange(Haplotype)
   
+      # One diamond per baseline ASO SNP actually present in this block, so the
+      # scale follows the configured pair rather than naming it.
+      aso_levels <- setdiff(unique(to_plot$aso_snp), "not ASO SNV")
+      aso_shapes <- c(stats::setNames(rep(23, length(aso_levels)), aso_levels),
+                      "not ASO SNV" = 21)
+
       p <- ggplot(to_plot, aes(x=pos, y=HapPattern, group=HapPattern)) +
           geom_line(color="grey81") +
           geom_point(aes(fill=allele, shape=aso_snp), size=3,
                      position=position_jitter(width=5, height=0)) +
           scale_fill_manual(values=allele_colors, name="Allele") +
           scale_shape_manual(
-              values=c("2:165375124:A:G"=23, "2:165322227:A:G"=23, "not ASO SNV"=21),
+              values=aso_shapes,
               name="ASO SNV") +
           guides(fill=guide_legend(override.aes=list(shape=21))) +
           xlab("Position on chromosome 2") +

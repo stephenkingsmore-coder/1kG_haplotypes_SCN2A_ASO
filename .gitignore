@@ -1,3 +1,4 @@
-# Python bytecode
+# Python bytecode. Created when tests/smoke_step7.py imports the Step 7 script,
+# and by any direct python3 run of it.
 __pycache__/
 *.py[cod]
