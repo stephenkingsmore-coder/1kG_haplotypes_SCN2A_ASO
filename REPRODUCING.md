@@ -114,19 +114,27 @@ without resuming reads like the fix and is not, since each attempt would start a
 zero. It then runs `bgzip -t` over the finished file, because a transfer that stopped short
 still leaves a readable gzip header and would otherwise surface as a confusing failure in
 Step 2. A panel that is present but fails that test is resumed on the next run rather than
-trusted, which costs one pass over the file per run.
+trusted, which costs one pass over the file per run; one that is corrupt rather than short is
+already the full length, so there is nothing for the server to resume and the step tells you to
+delete it and start again.
 
-Know what that was tested against. **The resume was verified as a mechanism against a different
-Range-capable host** — it transferred only the missing remainder and reproduced the full file's
-sha256 exactly, where the same command without it re-downloaded everything — and **against the
-1kGP FTP route itself it is reviewed and not run**, because the container this guide was written
-in cannot reach that host. Two further limits are worth knowing before you lean on it: `bgzip -t`
-validates each block's checksum and not that the blocks are the right blocks in the right order,
-so if the provider publishes a checksum, verify against that; and a resume sends a plain `Range`
-request with no conditional header, so if the file is re-released while you are interrupted the
-new bytes are spliced onto your old prefix and the fetch reports success. Note the file's `ETag`
-or `Last-Modified` before you start and pass it back with `-H 'If-Range: "<etag>"'` if that
-worries you; the risk is small on a dated release directory like this one.
+Know what that was tested against. **The resume is measured against the 1kGP route itself**, on
+2026-10-21: a transfer of the panel killed mid-stream resumed with `Range: bytes=5726208-` and
+`206` in a single request, and matched an independently fetched prefix byte for byte; the index,
+truncated and resumed, reproduced a clean download's sha256 exactly. Three limits come with that.
+No transfer of the 2.5 GB panel was carried through to the end, the largest being about 62 MB, so
+`bgzip -t` has never run over a real panel; the machine that measured it had no `bgzip` at all;
+and the no-validator path described below is unexercised, that host serving both headers. Two
+further limits are worth knowing before you lean on any of it: `bgzip -t` validates each block's
+checksum and not that the blocks are the right blocks in the right order, so if the provider
+publishes a checksum, verify against that; and a resume of a file that has been re-released since
+you were interrupted would splice the new bytes onto your old prefix, so Step 1 records the file's
+`ETag` and `Last-Modified` beside the partial download and re-reads them before resuming,
+starting over instead if either has changed. Do not reach for `If-Range` here, which is the
+obvious idiom and the wrong one: a conforming server answers a stale `If-Range` with the whole
+body, and curl, still resuming, would write that body at the resume offset. Where a host serves
+neither header the step says so in the log and resumes anyway, and there `bgzip -t` is the only
+remaining guard.
 
 The metadata TSV must keep the IGSR portal's own header: both Step 6 and Step 7 look
 up the columns **`Sample name`** and **`Superpopulation code`** by name, and Step 7
