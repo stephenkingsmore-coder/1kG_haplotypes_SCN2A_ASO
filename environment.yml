@@ -6,7 +6,7 @@
 # Status: these pins have not yet been solved on a machine with channel access,
 # so treat the first `env create` as part of the setup and report anything the
 # solver rejects. The pipeline was developed against bcftools 1.3 / samtools 1.9
-# (see README.md and the hardcoded path in scn2a_generate_asog_table.py); the
+# (see README.md; the Python step's samtools path reads from the config now); the
 # calls it makes -- bcftools view/convert --hapsample/query -l, samtools faidx,
 # plink --blocks/--r2 -- are stable across the 1.x series, so the pins below are
 # current releases rather than the originals. If a run diverges from the
@@ -25,7 +25,7 @@ dependencies:
   - htslib=1.19          # provides tabix and bgzip
   - plink=1.90b6.21      # PLINK 1.9 -- required for --blocks
   - samtools=1.19.2      # Step 7 sequence windows (samtools faidx)
-  - wget                 # Step 1 download
+  - curl                 # Step 1 download (resumes a partial transfer)
 
   # Step 7: standard library only
   - python=3.11
