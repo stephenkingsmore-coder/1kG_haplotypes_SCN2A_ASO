@@ -85,10 +85,20 @@ log "--- Step 1: Data acquisition ---"
 # and the fetch reports success. Measured against this host: a mid-file range returns 206
 # with no conditional sent, which cannot tell the two representations apart. So record the
 # representation each transfer started from, and restart rather than splice if it moved.
+# Fold the header name to lower case rather than matching case-insensitively: awk's IGNORECASE
+# is a GNU extension and does nothing under mawk, and an HTTP/2 host sends the names in lower
+# case, so matching them literally would read no validator at all and leave the guard below
+# silently inert. Folding the name also keeps the recorded string stable if curl negotiates a
+# different protocol version between runs, which would otherwise read as a changed file and
+# restart a multi-gigabyte download. The value is recorded exactly as served.
 remote_validator() {
     curl --location --silent --show-error --head "$1" 2>/dev/null \
         | tr -d '\r' \
-        | awk 'BEGIN{IGNORECASE=1} /^(ETag|Last-Modified):/ {print}' \
+        | awk '{ name = $0; sub(/:.*/, "", name)
+                 if (tolower(name) == "etag" || tolower(name) == "last-modified") {
+                     value = $0; sub(/^[^:]*:[ \t]*/, "", value)
+                     print tolower(name) ": " value
+                 } }' \
         | sort | tr '\n' ' '
 }
 
@@ -112,10 +122,22 @@ fetch_resumable() {
 
     [[ -n "${current}" ]] && printf '%s\n' "${current}" > "${stamp}"
 
-    curl --location --fail \
-         --continue-at - \
-         --retry 5 --retry-delay 10 --retry-all-errors \
-         --output "${dest}" "${url}"
+    # curl exits 0 on the 416 a server returns when the file on disk is already the full
+    # length and there is nothing left to send, so the exit code alone cannot tell that case
+    # from a finished transfer and --fail does not cover it. Read the status code and treat
+    # 416 as the failure it is, so the caller's advice - delete the file and run again - is
+    # what the operator actually sees.
+    local code
+    code="$(curl --location --fail \
+                 --continue-at - \
+                 --retry 5 --retry-delay 10 --retry-all-errors \
+                 --write-out '%{http_code}' \
+                 --output "${dest}" "${url}")" || return 1
+
+    if [[ "${code}" == "416" ]]; then
+        log "The server refused to resume ${dest}: it is already the full length (416)."
+        return 1
+    fi
 }
 
 # The panel and its index are checked separately, so a missing index is fetched on its own
