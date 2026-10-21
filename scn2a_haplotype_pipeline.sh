@@ -80,12 +80,64 @@ log "--- Step 1: Data acquisition ---"
 # with a connection reset. --retry on its own restarts from byte zero, which turns one failed
 # transfer into several and can spend a long time leaving nothing behind; --continue-at is
 # the flag that resumes, and the retry flags ride on top of it.
+# A resume sends a plain Range request with no conditional header, so if the file is
+# re-released while a transfer is interrupted, the new bytes are appended to the old prefix
+# and the fetch reports success. Measured against this host: a mid-file range returns 206
+# with no conditional sent, which cannot tell the two representations apart. So record the
+# representation each transfer started from, and restart rather than splice if it moved.
+# Fold the header name to lower case rather than matching case-insensitively: awk's IGNORECASE
+# is a GNU extension and does nothing under mawk, and an HTTP/2 host sends the names in lower
+# case, so matching them literally would read no validator at all and leave the guard below
+# silently inert. Folding the name also keeps the recorded string stable if curl negotiates a
+# different protocol version between runs, which would otherwise read as a changed file and
+# restart a multi-gigabyte download. The value is recorded exactly as served.
+remote_validator() {
+    curl --location --silent --show-error --head "$1" 2>/dev/null \
+        | tr -d '\r' \
+        | awk '{ name = $0; sub(/:.*/, "", name)
+                 if (tolower(name) == "etag" || tolower(name) == "last-modified") {
+                     value = $0; sub(/^[^:]*:[ \t]*/, "", value)
+                     print tolower(name) ": " value
+                 } }' \
+        | sort | tr '\n' ' '
+}
+
 fetch_resumable() {
-    local url="$1" dest="$2"
-    curl --location --fail \
-         --continue-at - \
-         --retry 5 --retry-delay 10 --retry-all-errors \
-         --output "${dest}" "${url}"
+    local url="$1" dest="$2" stamp="$2.remote" current previous
+    current="$(remote_validator "${url}")"
+
+    if [[ -f "${dest}" && -s "${stamp}" ]]; then
+        previous="$(cat "${stamp}")"
+        if [[ -z "${current}" ]]; then
+            log "WARNING: ${url} served no ETag or Last-Modified, so a resume cannot be"
+            log "         checked against the copy on disk. Resuming; the completeness"
+            log "         check below is the only guard if the file was re-released."
+        elif [[ "${current}" != "${previous}" ]]; then
+            log "The remote file changed since the interrupted transfer; starting over"
+            log "  was: ${previous}"
+            log "  now: ${current}"
+            rm -f "${dest}"
+        fi
+    fi
+
+    [[ -n "${current}" ]] && printf '%s\n' "${current}" > "${stamp}"
+
+    # curl exits 0 on the 416 a server returns when the file on disk is already the full
+    # length and there is nothing left to send, so the exit code alone cannot tell that case
+    # from a finished transfer and --fail does not cover it. Read the status code and treat
+    # 416 as the failure it is, so the caller's advice - delete the file and run again - is
+    # what the operator actually sees.
+    local code
+    code="$(curl --location --fail \
+                 --continue-at - \
+                 --retry 5 --retry-delay 10 --retry-all-errors \
+                 --write-out '%{http_code}' \
+                 --output "${dest}" "${url}")" || return 1
+
+    if [[ "${code}" == "416" ]]; then
+        log "The server refused to resume ${dest}: it is already the full length (416)."
+        return 1
+    fi
 }
 
 # The panel and its index are checked separately, so a missing index is fetched on its own
