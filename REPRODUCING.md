@@ -22,7 +22,8 @@ treat the first real run as the test and correct this file from it.
 | `Rscript` | Step 6 | not checked by the pipeline's dependency loop; a missing R fails at Step 6 |
 | `python3` | Step 7 | standard library only, 3.7+ in practice (`subprocess.run(capture_output=)`) |
 | `samtools` | reference indexing, Step 7 | `faidx` only |
-| `wget` | Step 1 | only if you let the pipeline download the panel — see §6.2 |
+| `curl` | Step 1 | only if you let the pipeline download the panel — see §6.2 |
+| `bgzip` | Step 1 | checks the downloaded panel is complete; ships with htslib |
 
 R packages: `data.table`, `dplyr`, `tidyr`, `ggplot2`, `forcats`, `viridis`,
 `patchwork`, `gridExtra`, and two the README omits — **`rlang`** (used as
@@ -46,7 +47,7 @@ bcftools="$CONDA_PREFIX/bin/bcftools"
 samtools="$CONDA_PREFIX/bin/samtools"
 ```
 
-`tabix`, `python3` and `Rscript` are called bare and must be on `PATH`. Every use of
+`tabix`, `bgzip`, `curl`, `python3` and `Rscript` are called bare and must be on `PATH`. Every use of
 samtools now goes through the config variable: the dependency check, the reference
 indexing, and Step 7, which receives it as `--samtools`. Inside the conda environment
 all of this holds.
@@ -101,9 +102,31 @@ VCF is downloadable by the pipeline.
 | File | Where it comes from | Approx. size |
 |---|---|---|
 | `Homo_sapiens_assembly38.fasta` | GRCh38 reference (Broad bundle); must be the `chr`-prefixed GRCh38 the panel is called against | ~3 GB |
-| `1kGP_high_coverage_Illumina.chr2.filtered.SNV_INDEL_SV_phased_panel.vcf.gz` + `.tbi` | [1kGP 30x phased panel](https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/) | ~1–2 GB |
+| `1kGP_high_coverage_Illumina.chr2.filtered.SNV_INDEL_SV_phased_panel.vcf.gz` + `.tbi` | [1kGP 30x phased panel](https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/) | 2.5 GB |
 | `igsr-1000genomes_sampleMap_30x_grch38-samples.tsv` | [IGSR data portal](https://www.internationalgenome.org/data-portal/sample) | small |
 | `1kG_30x_2504unrelated.txt` | the 2,504-sample list, one ID per line | small |
+
+**The panel is one 2.5 GB file** (`Content-Length: 2506332497`, read by range request on
+2026-10-20), and a transfer that size can drop partway: one attempt from this project's cloud
+container died with `curl: (56) Recv failure: Connection reset by peer`. Step 1 therefore
+fetches it with `curl --continue-at -`, which **resumes** rather than restarts — retrying
+without resuming reads like the fix and is not, since each attempt would start again from byte
+zero. It then runs `bgzip -t` over the finished file, because a transfer that stopped short
+still leaves a readable gzip header and would otherwise surface as a confusing failure in
+Step 2. A panel that is present but fails that test is resumed on the next run rather than
+trusted, which costs one pass over the file per run.
+
+Know what that was tested against. **The resume was verified as a mechanism against a different
+Range-capable host** — it transferred only the missing remainder and reproduced the full file's
+sha256 exactly, where the same command without it re-downloaded everything — and **against the
+1kGP FTP route itself it is reviewed and not run**, because the container this guide was written
+in cannot reach that host. Two further limits are worth knowing before you lean on it: `bgzip -t`
+validates each block's checksum and not that the blocks are the right blocks in the right order,
+so if the provider publishes a checksum, verify against that; and a resume sends a plain `Range`
+request with no conditional header, so if the file is re-released while you are interrupted the
+new bytes are spliced onto your old prefix and the fetch reports success. Note the file's `ETag`
+or `Last-Modified` before you start and pass it back with `-H 'If-Range: "<etag>"'` if that
+worries you; the risk is small on a dated release directory like this one.
 
 The metadata TSV must keep the IGSR portal's own header: both Step 6 and Step 7 look
 up the columns **`Sample name`** and **`Superpopulation code`** by name, and Step 7
@@ -165,7 +188,7 @@ What each step consumes and produces:
 
 | Step | Reads | Writes | Fails if |
 |---|---|---|---|
-| 1 Acquire | `VCF_URL` | `data/…chr2….vcf.gz` + `.tbi` | skipped when the panel and its `.tbi` are already in `data/` |
+| 1 Acquire | `VCF_URL` | `data/…chr2….vcf.gz` + `.tbi` | panel and index are checked separately; a complete panel is skipped, an incomplete one resumed, and the panel must pass `bgzip -t` |
 | 2 Region subset | chr2 panel | `REGION_VCF` + `.tbi` | skipped when both already exist |
 | 3 Sample subset | `REGION_VCF`, `SAMPLE_SUBSET_FILE` | `OUTDIR/analysis_input.vcf.gz` | symlinks the region VCF when no subset file is set; cohort size is counted here and passed to Step 7 |
 | 4 Blocks + LD | `analysis_input.vcf.gz` | `plink/scn2a.{bed,bim,fam,blocks,blocks.det,ld}` | PLINK 2 instead of 1.9 |
@@ -300,14 +323,16 @@ that absolute path in a traceback, you are running a copy from before the fix.
 
 **8.2 — The configured download URL could not be fetched. Fixed on `main`.** `VCF_URL`
 held a `urldefense.com` rewrite left by a mail gateway, with a trailing space, so both
-of Step 1's `wget` calls failed — the panel and `"${VCF_URL}.tbi"`. It now holds the
+of Step 1's downloads failed — the panel and `"${VCF_URL}.tbi"`; both used `wget` then,
+and Step 1 uses `curl` now (§3). It now holds the
 plain EBI address under the 1kGP FTP directory linked in §3. Staging the panel into
-`data/` by hand is still the quicker route if you already have it, since Step 1 skips
-the download when the `.vcf.gz` and its `.tbi` are both present.
+`data/` by hand is still the quicker route if you already have it: Step 1 checks the panel and
+its index separately and skips either one that is already there and complete, so a staged panel
+with no index costs you the index alone (§3).
 
 **8.3 — `Rscript` is not in the dependency check.** The loop at
-`scn2a_haplotype_pipeline.sh:56` validates `bcftools`, `plink`, `samtools`, `tabix`
-and `python3`. A machine without R, or missing one R package, still gets through
+`scn2a_haplotype_pipeline.sh:56` validates `bcftools`, `plink`, `samtools`, `tabix`,
+`bgzip`, `curl` and `python3`. A machine without R, or missing one R package, still gets through
 Steps 1–5 and fails at Step 6, after the expensive subsetting work. This one is open.
 
 **8.4 — `samtools` used to be named three different ways; it is named once now. Fixed

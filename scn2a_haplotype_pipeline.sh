@@ -18,7 +18,7 @@
 #   asog_input_table.tsv       ASOG input table with ranking
 #   run.log                    Automated run log with cohort stats
 #
-# Requirements: bcftools, plink (v1.9), tabix, python3, samtools/faidx
+# Requirements: bcftools, plink (v1.9), tabix, bgzip, curl, python3, samtools/faidx
 # =============================================================================
 
 set -euo pipefail
@@ -53,7 +53,7 @@ log "Run ID: ${RUN_ID}"
 # Validate required tools
 # ---------------------------------------------------------------------------
 log "--- Checking dependencies ---"
-for tool in "${bcftools}" "${plink}" "${samtools}" tabix python3; do
+for tool in "${bcftools}" "${plink}" "${samtools}" tabix bgzip curl python3; do
     if ! command -v "${tool}" &>/dev/null; then
         log "ERROR: Required tool not found: ${tool}"
         exit 1
@@ -76,13 +76,58 @@ fi
 # ---------------------------------------------------------------------------
 log "--- Step 1: Data acquisition ---"
 
-if [[ -f "${CHR2_VCF}" && -f "${CHR2_VCF}.tbi" ]]; then
-    log "Chr2 VCF already exists, skipping download: ${CHR2_VCF}"
+# The panel is a single multi-gigabyte file and this transfer has been seen to die partway
+# with a connection reset. --retry on its own restarts from byte zero, which turns one failed
+# transfer into several and can spend a long time leaving nothing behind; --continue-at is
+# the flag that resumes, and the retry flags ride on top of it.
+fetch_resumable() {
+    local url="$1" dest="$2"
+    curl --location --fail \
+         --continue-at - \
+         --retry 5 --retry-delay 10 --retry-all-errors \
+         --output "${dest}" "${url}"
+}
+
+# The panel and its index are checked separately, so a missing index is fetched on its own
+# instead of forcing the whole panel to be downloaded again. A transfer that stopped short
+# still leaves a readable gzip header, so presence alone does not mean complete: bgzip -t
+# reads every block's checksum, and a panel that fails it is resumed rather than trusted.
+# That test reads the whole file, so it costs a pass over the panel on every run.
+if [[ -f "${CHR2_VCF}" ]] && bgzip -t "${CHR2_VCF}" 2>/dev/null; then
+    log "Chr2 VCF already present and complete, skipping download: ${CHR2_VCF}"
 else
-    log "Downloading chr2 VCF from 1kGP FTP..."
-    wget -q --show-progress -O "${CHR2_VCF}" "${VCF_URL}"
-    wget -q --show-progress -O "${CHR2_VCF}.tbi" "${VCF_URL}.tbi"
-    log "Download complete: ${CHR2_VCF}"
+    if [[ -f "${CHR2_VCF}" ]]; then
+        log "Chr2 VCF is present but incomplete; resuming the transfer"
+    else
+        log "Downloading chr2 VCF from 1kGP FTP..."
+    fi
+    # A file that is corrupt rather than short is already at its full length, so the server
+    # has nothing left to send and refuses the resume. Say so, because the fix is different.
+    if ! fetch_resumable "${VCF_URL}" "${CHR2_VCF}"; then
+        log "ERROR: the panel transfer failed. If ${CHR2_VCF} is present and already the"
+        log "       full size, the server cannot resume it: delete it and run again."
+        exit 1
+    fi
+
+    log "Verifying the downloaded panel is complete..."
+    if ! bgzip -t "${CHR2_VCF}"; then
+        log "ERROR: ${CHR2_VCF} is still truncated or corrupt after the transfer."
+        log "       Re-run to resume; if it keeps failing, delete the file and start over."
+        exit 1
+    fi
+    log "Download complete and verified: ${CHR2_VCF}"
+fi
+
+if [[ -f "${CHR2_VCF}.tbi" ]]; then
+    log "Chr2 VCF index already exists, skipping download: ${CHR2_VCF}.tbi"
+else
+    log "Downloading chr2 VCF index..."
+    if ! fetch_resumable "${VCF_URL}.tbi" "${CHR2_VCF}.tbi"; then
+        log "ERROR: the index transfer failed. If ${CHR2_VCF}.tbi is present and already the"
+        log "       full size, the server cannot resume it: delete it and run again."
+        exit 1
+    fi
+    log "Index downloaded: ${CHR2_VCF}.tbi"
 fi
 
 # ---------------------------------------------------------------------------
