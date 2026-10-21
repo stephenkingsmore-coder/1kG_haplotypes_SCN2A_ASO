@@ -9,11 +9,10 @@ haplotype block. It exercises the genotype counter, the superpopulation
 stratification, the block/haplotype join, the sequence window and the ranking,
 without needing the 1kGP panel or the GRCh38 reference.
 
-The Step 7 script shells out to samtools faidx at a path hardcoded for the
-authors' server (see REPRODUCING.md, "Known rough edges"), so this test
-substitutes a pure-Python faidx of the fixture FASTA. That keeps the test
-runnable anywhere with python3 alone, and keeps it independent of whether that
-path is ever made configurable.
+The Step 7 script shells out to samtools faidx for its sequence windows. This
+test substitutes a pure-Python faidx of the fixture FASTA, and a stub for the
+upfront samtools check, so that it stays runnable anywhere with python3 alone.
+The real samtools path is exercised by a full run, not here.
 
 Usage:
     python3 tests/smoke_step7.py
@@ -41,8 +40,12 @@ def load_step7():
     return module
 
 
-def python_faidx(ref_fasta, chrom, start, end):
-    """Stand in for `samtools faidx <fasta> <chrom>:<start>-<end>` (1-based, inclusive)."""
+def python_faidx(samtools, ref_fasta, chrom, start, end):
+    """Stand in for `samtools faidx <fasta> <chrom>:<start>-<end>` (1-based, inclusive).
+
+    Mirrors fetch_sequence's signature, samtools argument included, so that the
+    substitution stays a drop-in.
+    """
     seqs, current = {}, None
     with open(ref_fasta) as fh:
         for line in fh:
@@ -70,6 +73,8 @@ def check(condition, message):
 def main():
     step7 = load_step7()
     step7.fetch_sequence = python_faidx
+    # No samtools here, so skip the upfront check the real run depends on.
+    step7.check_samtools = lambda samtools, ref_fasta: "pure-Python faidx stand-in"
 
     with tempfile.TemporaryDirectory() as outdir:
         sys.argv = [
