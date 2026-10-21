@@ -80,8 +80,38 @@ log "--- Step 1: Data acquisition ---"
 # with a connection reset. --retry on its own restarts from byte zero, which turns one failed
 # transfer into several and can spend a long time leaving nothing behind; --continue-at is
 # the flag that resumes, and the retry flags ride on top of it.
+# A resume sends a plain Range request with no conditional header, so if the file is
+# re-released while a transfer is interrupted, the new bytes are appended to the old prefix
+# and the fetch reports success. Measured against this host: a mid-file range returns 206
+# with no conditional sent, which cannot tell the two representations apart. So record the
+# representation each transfer started from, and restart rather than splice if it moved.
+remote_validator() {
+    curl --location --silent --show-error --head "$1" 2>/dev/null \
+        | tr -d '\r' \
+        | awk 'BEGIN{IGNORECASE=1} /^(ETag|Last-Modified):/ {print}' \
+        | sort | tr '\n' ' '
+}
+
 fetch_resumable() {
-    local url="$1" dest="$2"
+    local url="$1" dest="$2" stamp="$2.remote" current previous
+    current="$(remote_validator "${url}")"
+
+    if [[ -f "${dest}" && -s "${stamp}" ]]; then
+        previous="$(cat "${stamp}")"
+        if [[ -z "${current}" ]]; then
+            log "WARNING: ${url} served no ETag or Last-Modified, so a resume cannot be"
+            log "         checked against the copy on disk. Resuming; the completeness"
+            log "         check below is the only guard if the file was re-released."
+        elif [[ "${current}" != "${previous}" ]]; then
+            log "The remote file changed since the interrupted transfer; starting over"
+            log "  was: ${previous}"
+            log "  now: ${current}"
+            rm -f "${dest}"
+        fi
+    fi
+
+    [[ -n "${current}" ]] && printf '%s\n' "${current}" > "${stamp}"
+
     curl --location --fail \
          --continue-at - \
          --retry 5 --retry-delay 10 --retry-all-errors \
